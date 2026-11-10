@@ -1,477 +1,384 @@
-print("[ArchipelagoMod] Mod loaded!\n")
+-- StrayAP v0.0.4 / Safe Sync experimental (2026-11-10)
+-- Drop-in replacement for the upstream main.lua. Keeps StrayAP's original
+-- network and location-check hooks, but synchronizes inventory non-destructively.
+print("[ArchipelagoMod] Safe Sync client loading")
 local AP = require "lua-apclientpp"
 local UEHelpers = require "UEHelpers"
 local receiving = require "receiving"
 local sending = require "sending"
-print("[ArchipelagoMod] Mod initalized!\n")
 
 local game_name = "Stray"
 local client_version = {0, 6, 7}
 local version = "v0.0.4"
-local compatable_versions = {"v0.0.1", "v0.0.2", "v0.0.3", "v0.0.4"}
+local compatible = {"v0.0.1", "v0.0.2", "v0.0.3", "v0.0.4"}
 local message_format = AP.RenderFormat.TEXT
 local uuid = ""
----@type APClient
+
 ap = nil
 pending_game_actions = {}
 all_received_items = {}
 slot_data = {}
 APMessageFeed = nil
+APFeedScrollBox = nil
 currentGameProgression = 0
+scrollPending = false
 
--- USEFUL COMMANDS:
--- ap:Say("Hello!") -> Sends a chat message to the server
--- ap:ConnectUpdate(nil, {"Lua-APClientPP", "DeathLink"}) -> Changes server tags, like enabling/disabling deathlink
--- ap:LocationChecks({64000, 64001, 64002}) -> Mark locations as checked
--- most other common packets have similar commands
--- ap.missing_locations -> returns a table of all missing location IDs
--- ap.checked_locations -> returns a table of all checked location IDs
--- ap:get_players() -> returns all players as the Player object, which includes slot and name
--- ap:get_player_game(player.slot) -> returns a string of the game that player is playing
+local session_number = 0
+local latest_message = 0
+local show_hud = true
+local textClass = nil
+local seen_receipts = {}
+local debug_bound = false
+local debug_widget = nil
 
-function connect(server, slot, password)
-    function on_socket_connected()
-        print("[ArchipelagoMod] Socket connected\n")
-        table.insert(pending_game_actions, {
-            type = "message",
-            text = "Connecting..."
-        })
-    end
-
-    function on_socket_error(msg)
-        print("[ArchipelagoMod] Socket error: " .. msg .. "\n")
-        table.insert(pending_game_actions, {
-            type = "message",
-            text = "Connection Error: " .. msg
-        })
-    end
-
-    function on_socket_disconnected()
-        print("[ArchipelagoMod] Socket disconnected\n")
-        table.insert(pending_game_actions, {
-            type = "message",
-            text = "Disconnected from Archipelago."
-        })
-        disconnect()
-    end
-
-    function on_room_info()
-        print("[ArchipelagoMod] Received room info, attempting connection...\n")
-        ap:ConnectSlot(slot, password or "", 7, {"Lua-APClientPP"}, client_version)
-    end
-
-    function on_slot_connected(data)
-        slot_data = data -- make global variable
-        -- ap:get_item_name and ap:get_location_name for all datapackages
-
-        if ap:get_game() == "Stray" then
-            -- ap:get_item_name and ap:get_location_name for local datapackage
-        end
-
-        print("[ArchipelagoMod] Slot connected. Slot data:\n")
-        print("[ArchipelagoMod] APWorldVersion: " .. tostring(slot_data.APWorldVersion) .. "\n")
-        local compatable = false
-        for _, compat_version in ipairs(compatable_versions) do
-            if slot_data.APWorldVersion == compat_version then
-                compatable = true
-                break
-            end
-        end
-        if compatable == false then
-            local message = "AP version mismatch! These two versions are not compatable! Server is " .. tostring(slot_data.APWorldVersion) .. ", Client is " .. tostring(version)
-            print("[ArchipelagoMod]" .. message .. ". Disconnecting.\n")
-            os.execute("msg * " .. message) -- displays an os-specific message box popup
-            AddMessageToAPFeed("Force disconnecting due to version mismatch.")
-            disconnect() -- force disconnect
-        end
-        if slot_data.APWorldVersion ~= version and compatable == true then
-            local message = "Minor AP version mismatch! These two versions should be compatable, but proceed with caution. Server is " .. tostring(slot_data.APWorldVersion) .. ", Client is " .. tostring(version)
-            print("[ArchipelagoMod]" .. message .. ".\n")
-            os.execute("msg * " .. message) -- displays an os-specific message box popup
-            AddMessageToAPFeed("Compatable version mismatch. Proceed with caution, and change versions if possible.")
-        end
-        print("[ArchipelagoMod] Goal: " .. tostring(slot_data.Goal) .. "\n") -- 1 = Open the city, 2 = All Badges, 3 = Both, 4 = Specific Chapter
-        print("[ArchipelagoMod] ChapterGoal: " .. tostring(slot_data.ChapterGoal) .. "\n") -- Chapters are in order from chapter 4 to 11
-        print("[ArchipelagoMod] DeathLink: " .. tostring(slot_data.DeathLink) .. "\n") -- this returns as an int, so 0 is False and 1 is True
-        print("[ArchipelagoMod] End Slot data.\n")
-        print("[ArchipelagoMod] Missing locations: " .. table.concat(ap.missing_locations, ", ") .. "\n")
-        print("[ArchipelagoMod] Checked locations: " .. table.concat(ap.checked_locations, ", ") .. "\n")
-        print("[ArchipelagoMod] Players:\n")
-        local players = ap:get_players()
-        for _, player in ipairs(players) do
-            print("  " .. tostring(player.slot) .. ": " .. player.name ..
-                  " playing " .. ap:get_player_game(player.slot) .. "\n")
-        end
-    end
-
-    function on_slot_refused(reasons)
-        print("[ArchipelagoMod] Connection refused: " .. table.concat(reasons, ", ") .. "\n")
-        table.insert(pending_game_actions, {
-            type = "message",
-            text = "Connection refused: " .. table.concat(reasons, ", ")
-        })
-    end
-
-    function on_items_received(items)
-        print("[ArchipelagoMod] Item(s) received:\n")
-        for _, item in ipairs(items) do
-            print(item.item .. "\n")
-            table.insert(all_received_items, item.item)
-            ExecuteInGameThread(function()
-                receiving.ProcessItem(item.item)
-            end)
-        end
-        print("\n")
-    end
-
-    function on_location_info(items)
-        print("[ArchipelagoMod] Location(s) scouted: ")
-        for _, item in ipairs(items) do
-            print(item.item)
-        end
-        print("\n")
-    end
-
-    function on_location_checked(locations)
-        print("[ArchipelagoMod] Location(s) checked:" .. table.concat(locations, ", ") .. "\n")
-        print("[ArchipelagoMod] Checked locations: " .. table.concat(ap.checked_locations, ", ") .. "\n")
-    end
-
-    function on_data_package_changed(data_package)
-        print("[ArchipelagoMod] Data package changed:\n")
-        for k,v in pairs(data_package) do
-            print(k .. ": " .. tostring(v) .. "\n")
-        end
-    end
-
-    function on_print(msg)
-        print("[ArchipelagoMod] Print: " .. msg .. "\n")
-    end
-
-    function on_print_json(msg, extra)
-        print("[ArchipelagoMod] PrintJSON: " .. ap:render_json(msg, message_format) .. "\n")
-        table.insert(pending_game_actions, {
-            type = "message",
-            text = ap:render_json(msg, message_format)
-        })
-    end
-
-    function on_bounced(bounce)
-        print("[ArchipelagoMod] Bounce received:\n")
-        for k,v in pairs(bounce) do
-            print(k .. ": " .. tostring(v) .. "\n")
-        end
-    end
-
-    function on_retrieved(map, keys, extra)
-        print("[ArchipelagoMod] Retrieved:\n")
-        -- since lua tables won't contain nil values, we can use keys array
-        for _, key in ipairs(keys) do
-            print("  " .. key .. ": " .. tostring(map[key]))
-        end
-        print("\n")
-        -- extra will include extra fields from Get
-        print("Extra:\n")
-        for key, value in pairs(extra) do
-            print("  " .. key .. ": " .. tostring(value))
-        end
-        print("\n")
-        -- both keys and extra are optional
-    end
-
-    function on_set_reply(message)
-        print("[ArchipelagoMod] Set Reply:\n")
-        for key, value in pairs(message) do
-            print("  " .. key .. ": " .. tostring(value))
-            if key == "value" and type(value) == "table" then
-                for subkey, subvalue in pairs(value) do
-                    print("    " .. subkey .. ": " .. tostring(subvalue))
-                end
-            end
-        end
-        print("\n")
-    end
-
-    ap = AP(uuid, game_name, server);
-
-    ap:set_socket_connected_handler(on_socket_connected)
-    ap:set_socket_error_handler(on_socket_error)
-    ap:set_socket_disconnected_handler(on_socket_disconnected)
-    ap:set_room_info_handler(on_room_info)
-    ap:set_slot_connected_handler(on_slot_connected)
-    ap:set_slot_refused_handler(on_slot_refused)
-    ap:set_items_received_handler(on_items_received)
-    ap:set_location_info_handler(on_location_info)
-    ap:set_location_checked_handler(on_location_checked)
-    ap:set_data_package_changed_handler(on_data_package_changed)
-    ap:set_print_handler(on_print)
-    ap:set_print_json_handler(on_print_json)
-    ap:set_bounced_handler(on_bounced)
-    ap:set_retrieved_handler(on_retrieved)
-    ap:set_set_reply_handler(on_set_reply)
+local function log(message)
+    print("[ArchipelagoMod] " .. tostring(message))
 end
 
-function AP_Connect(host, slot, password)
-    print("[ArchipelagoMod] Connecting to: " .. host .. "\n")
+local function enqueueMessage(message)
+    pending_game_actions[#pending_game_actions + 1] = {
+        type = "message", text = tostring(message)
+    }
+end
+
+function SetupUI()
+    if not show_hud then return end
     local world = UEHelpers:GetWorld()
-    if world:GetFullName() == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then -- main menu
-        AddMessageToAPFeed("Must be in-game to connect!") -- refuse connection on the main menu
-        print("[ArchipelagoMod] Refusing to connect on the main menu.")
+    if not world or not world:IsValid() then return end
+    local widgetClass = StaticFindObject("/Script/UMG.UserWidget")
+    local treeClass = StaticFindObject("/Script/UMG.WidgetTree")
+    local canvasClass = StaticFindObject("/Script/UMG.CanvasPanel")
+    local scrollClass = StaticFindObject("/Script/UMG.ScrollBox")
+    local verticalClass = StaticFindObject("/Script/UMG.VerticalBox")
+    textClass = StaticFindObject("/Script/UMG.TextBlock")
+    if not widgetClass or not treeClass or not canvasClass or
+       not scrollClass or not verticalClass or not textClass then
+        log("HUD classes unavailable")
         return
     end
-    ExecuteAsync(function()
-        connect(host, slot, password)
-    end)
 
-    local savedata = FindFirstOf("BP_HKSessionSaveData_C")
-    local currentGameProgression = savedata.ChapterAdventureState
-    print("[ArchipelagoMod] AdventureState: " .. currentGameProgression)
+    -- World changes invalidate widgets. Do not use the old feed.
+    APMessageFeed = nil
+    APFeedScrollBox = nil
+    local widget = StaticConstructObject(widgetClass, world, 0, 0, 0, nil, false, false, nil)
+    local tree = StaticConstructObject(treeClass, widget, 0, 0, 0, nil, false, false, nil)
+    widget.WidgetTree = tree
+    local canvas = StaticConstructObject(canvasClass, tree, 0, 0, 0, nil, false, false, nil)
+    tree.RootWidget = canvas
+    local scroll = StaticConstructObject(scrollClass, tree, 0, 0, 0, nil, false, false, nil)
+    local slot = canvas:AddChildToCanvas(scroll)
+    slot:SetAnchors({Minimum={X=0.02, Y=0.55}, Maximum={X=0.35, Y=0.98}})
+    local feed = StaticConstructObject(verticalClass, tree, 0, 0, 0, nil, false, false, nil)
+    scroll:AddChild(feed)
+    widget:AddToViewport(999)
+    APFeedScrollBox = scroll
+    APMessageFeed = feed
+end
 
-	ResyncInventory()
+function AddMessageToAPFeed(message)
+    if not show_hud then return end
+    if not APMessageFeed or not APMessageFeed:IsValid() then SetupUI() end
+    local feed = APMessageFeed
+    if not feed or not feed:IsValid() then return end
+    local newText = StaticConstructObject(textClass, feed, 0, 0, 0, nil, false, false, nil)
+    newText:SetText(FText(tostring(message)))
+    newText:SetAutoWrapText(true)
+    newText.Font.Size = 17
+    feed:AddChild(newText)
+    scrollPending = true
 
-    LoopAsync(200, function()
-        if ap == nil then return false end
-        xpcall(function()
-            ap:poll()
-            if scrollPending and APFeedScrollBox ~= nil then
-                scrollPending = false
-                APFeedScrollBox:ScrollToEnd()
-            end
-            ExecuteInGameThread(function()
-                if savedata.ChapterAdventureState > currentGameProgression then -- the player has crossed a chapter boundary
-					currentGameProgression = savedata.ChapterAdventureState
-                    print("[ArchipelagoMod] AdventureState changed! Now " .. currentGameProgression .. ". Resyncing inventory...\n")
-                    ResyncInventory()
-                end
-            end)
-            while #pending_game_actions > 0 do
-                local action = table.remove(pending_game_actions, 1)
-
-                if action.type == "message" then
-                    ExecuteInGameThread(function()
-                        AddMessageToAPFeed(action.text)
-                    end)
-                end
-
-                if action.type == "SendLocations" then
-                    ap:LocationChecks({action.id})
-                end
-            end
-        end, function()
-            disconnect()
+    -- Remove obsolete notifications six seconds after the newest message.
+    latest_message = latest_message + 1
+    local this_message = latest_message
+    ExecuteWithDelay(6000, function()
+        ExecuteInGameThread(function()
+            if this_message ~= latest_message or APMessageFeed ~= feed then return end
+            if feed:IsValid() then feed:ClearChildren() end
         end)
     end)
 end
 
-function disconnect()
-    if ap == nil then 
+function ResyncInventory()
+    if not ap then
+        log("Cannot resync while disconnected")
         return
     end
-    print("[ArchipelagoMod] Disconnected.\n")
-    AddMessageToAPFeed("Disconnected from Archipelago.")
+    -- Never call Backpack:ClearInventory or write directly to m_inventory.
+    receiving.ReconcileInventory(all_received_items)
+end
+
+function disconnect()
+    if not ap then return end
+    log("Disconnected")
+    -- Note: UI access happens on the game thread; other callbacks may be async.
     ap = nil
+    session_number = session_number + 1
     pending_game_actions = {}
     all_received_items = {}
+    seen_receipts = {}
+    receiving.ResetSession()
     slot_data = {}
     currentGameProgression = 0
     collectgarbage("collect")
 end
 
-function ResyncInventory()
-    local backpack = FindFirstOf("BP_Backpack_C")
-    if not backpack or not backpack:IsValid() then
-        print("[ArchipelagoMod] Can't resync item inventory because the cat doesn't have the backpack!\n")
-    else
-        if not ap then
-            print("[ArchipelagoMod] Can't resync item inventory when not connected!\n")
+function connect(server, slot, password)
+    if ap then return end
+    session_number = session_number + 1
+    local session = session_number
+    local client = AP(uuid, game_name, server)
+    ap = client
+    log("Connecting to " .. tostring(server) .. " as " .. tostring(slot))
+
+    client:set_socket_connected_handler(function()
+        log("Socket connected")
+        enqueueMessage("Connecting to Archipelago...")
+    end)
+    client:set_socket_error_handler(function(msg)
+        log("Socket error: " .. tostring(msg))
+        enqueueMessage("Connection error: " .. tostring(msg))
+    end)
+    client:set_socket_disconnected_handler(function()
+        log("Socket disconnected")
+        disconnect()
+    end)
+    client:set_room_info_handler(function()
+        log("Room info received")
+        client:ConnectSlot(slot, password or "", 7, {"Lua-APClientPP"}, client_version)
+    end)
+    client:set_slot_connected_handler(function(data)
+        slot_data = data
+        local remote = tostring(slot_data.APWorldVersion)
+        local allowed = false
+        for _, v in ipairs(compatible) do
+            if remote == v then allowed = true; break end
+        end
+        if not allowed then
+            log("Incompatible APWorld " .. remote .. ", client " .. version)
+            enqueueMessage("Incompatible Archipelago world version")
+            disconnect()
             return
         end
-        backpack:ClearInventory()
-        for _, item in ipairs(all_received_items) do
-            receiving.ProcessItem(item) -- reprocess all items
+        if remote ~= version then
+            log("Minor APWorld mismatch: " .. remote .. " vs " .. version)
+            enqueueMessage("APWorld version differs from client; use caution")
         end
-        SanitizeBackpackInventory()
-    end
-end
-
-function SanitizeBackpackInventory()
-    local backpack = FindFirstOf("BP_Backpack_C")
-    if not backpack or not backpack:IsValid() then
-        print("[ArchipelagoMod] Can't sanitize the inventory because the cat doesn't have the backpack!\n")
-        return
-    end
-    local array = backpack.m_inventory
-    local temp = {} -- temporary Lua table
-    array:ForEach(function(i, elem)
-        local val = elem:get()
-        if val ~= nil then
-            temp[#temp + 1] = val -- for each element, store its actual value inside the Lua table (if not nil)
+        log("Connected. Goal=" .. tostring(data.Goal) ..
+            " ChapterGoal=" .. tostring(data.ChapterGoal) ..
+            " DeathLink=" .. tostring(data.DeathLink))
+        enqueueMessage("Connected to Archipelago")
+    end)
+    client:set_slot_refused_handler(function(reasons)
+        local why = table.concat(reasons or {}, ", ")
+        log("Connection refused: " .. why)
+        enqueueMessage("Connection refused: " .. why)
+        disconnect()
+    end)
+    client:set_items_received_handler(function(items)
+        log("Received " .. tostring(#items) .. " item(s)")
+        for _, entry in ipairs(items) do
+            local id = tonumber(entry.item)
+            if id then
+                -- Each location in a multiworld is unique. Preserve legitimate
+                -- repeated item IDs acquired from different locations.
+                local receiptKey = nil
+                if entry.location and entry.player and
+                   tonumber(entry.location) and tonumber(entry.location) >= 0 then
+                    receiptKey = tostring(entry.player) .. ":" .. tostring(entry.location)
+                end
+                if not receiptKey or not seen_receipts[receiptKey] then
+                    all_received_items[#all_received_items + 1] = id
+                    if receiptKey then seen_receipts[receiptKey] = true end
+                    log("Received item " .. tostring(id))
+                end
+            end
+        end
+        ExecuteInGameThread(function()
+            if session == session_number and ap == client then ResyncInventory() end
+        end)
+    end)
+    client:set_location_info_handler(function(items)
+        log("Scouted " .. tostring(#items) .. " location(s)")
+    end)
+    client:set_location_checked_handler(function(locations)
+        log("Checked " .. tostring(#locations) .. " location(s)")
+    end)
+    client:set_data_package_changed_handler(function()
+        log("Data package updated")
+    end)
+    client:set_print_handler(function(msg)
+        log("Chat: " .. tostring(msg))
+    end)
+    client:set_print_json_handler(function(msg)
+        local ok, rendered = pcall(function() return client:render_json(msg, message_format) end)
+        if ok and rendered then
+            log("Chat: " .. tostring(rendered))
+            enqueueMessage(rendered)
         end
     end)
-    backpack:ClearInventory() -- wipe the inventory
-    for i, value in ipairs(temp) do
-        array[i] = value -- reassign each value explicity
-    end
+    client:set_bounced_handler(function()
+        -- Reserved for future DeathLink and bounce behavior.
+    end)
+    client:set_retrieved_handler(function() end)
+    client:set_set_reply_handler(function() end)
+
+    -- Start polling only AFTER client creation/handler registration; avoids
+    -- a race where the original polling loop could start while ap was nil.
+    LoopAsync(200, function()
+        if session ~= session_number or ap ~= client then return true end
+        local ok, errorMessage = pcall(function() client:poll() end)
+        if not ok then
+            log("Poll failed: " .. tostring(errorMessage))
+            disconnect()
+            return true
+        end
+        if session ~= session_number or ap ~= client then return true end
+        if scrollPending and APFeedScrollBox and APFeedScrollBox:IsValid() then
+            scrollPending = false
+            ExecuteInGameThread(function()
+                if APFeedScrollBox and APFeedScrollBox:IsValid() then
+                    APFeedScrollBox:ScrollToEnd()
+                end
+            end)
+        end
+        local actions = pending_game_actions
+        pending_game_actions = {}
+        for _, action in ipairs(actions) do
+            if action.type == "message" then
+                ExecuteInGameThread(function()
+                    if session == session_number then AddMessageToAPFeed(action.text) end
+                end)
+            elseif action.type == "SendLocations" and action.id then
+                local sent, cause = pcall(function() client:LocationChecks({action.id}) end)
+                if not sent then
+                    log("Location check failed: " .. tostring(cause))
+                    action.attempts = (action.attempts or 0) + 1
+                    if action.attempts < 3 then
+                        pending_game_actions[#pending_game_actions + 1] = action
+                    end
+                end
+            end
+        end
+        ExecuteInGameThread(function()
+            if session ~= session_number or ap ~= client then return end
+            local save = FindFirstOf("BP_HKSessionSaveData_C")
+            if save and save:IsValid() then
+                local now = tonumber(save.ChapterAdventureState) or 0
+                if now ~= currentGameProgression then
+                    currentGameProgression = now
+                    log("AdventureState now " .. now .. "; reconciling")
+                    ResyncInventory()
+                end
+            end
+        end)
+        return false -- LoopAsync stops only when callback returns true.
+    end)
 end
 
-function SetupUI() -- this function is a beautiful mess
-    local userWidgetClass = StaticFindObject("/Script/UMG.UserWidget")
-    local widgetTreeClass = StaticFindObject("/Script/UMG.WidgetTree")
-    local canvasClass = StaticFindObject("/Script/UMG.CanvasPanel")
-    local scrollClass = StaticFindObject("/Script/UMG.ScrollBox")
-    local verticalClass = StaticFindObject("/Script/UMG.VerticalBox")
-    textClass = StaticFindObject("/Script/UMG.TextBlock") -- RichTextBlock starts with nil font. Trying to set it always instantly crashes the engine. Let me know if you know a workaround to this.
+function AP_Connect(host, slot, password)
     local world = UEHelpers:GetWorld()
-    local spawnedUserWidget = StaticConstructObject(userWidgetClass, world, 0, 0, 0, nil, false, false, nil)
-    print("UserWidget created: " .. spawnedUserWidget:GetFullName() .. "\n")
-    local spawnedWidgetTree = StaticConstructObject(widgetTreeClass, spawnedUserWidget, 0, 0, 0, nil, false, false, nil)
-    spawnedUserWidget.WidgetTree = spawnedWidgetTree
-    print("WidgetTree created: " .. spawnedWidgetTree:GetFullName() .. "\n")
-    local spawnedCanvas = StaticConstructObject(canvasClass, spawnedWidgetTree, 0, 0, 0, nil, false, false, nil)
-    spawnedWidgetTree.RootWidget = spawnedCanvas
-    print("CanvasPanel created: " .. spawnedCanvas:GetFullName() .. "\n")
-    APFeedScrollBox = StaticConstructObject(scrollClass, spawnedWidgetTree, 0, 0, 0, nil, false, false, nil)
-    local slot = spawnedCanvas:AddChildToCanvas(APFeedScrollBox)
-    print("ScrollBox created and attached: " .. APFeedScrollBox:GetFullName() .. "\n")
-    slot:SetAnchors({Minimum={X=0.020000,Y=0.550000}, Maximum={X=0.350000,Y=0.980000}}) -- Size of the message feed itself, resolution independant
-    APMessageFeed = StaticConstructObject(verticalClass, spawnedWidgetTree, 0, 0, 0, nil, false, false, nil)
-    APFeedScrollBox:AddChild(APMessageFeed)
-    spawnedUserWidget:AddToViewport(999) -- high ZOrder so it's above other menus
-    AddMessageToAPFeed("Archipelago Mod Initalized. Start/load a save and use apconnect in the Unreal Engine console to connect.")
-end
-
-function AddMessageToAPFeed(text)
-    if APMessageFeed == nil then
-        SetupUI()
+    if not world or not world:IsValid() then return end
+    if world:GetFullName() == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then
+        log("Start or load a game before connecting")
+        AddMessageToAPFeed("Start/load a save before connecting")
+        return
     end
-    local newText = StaticConstructObject(textClass, APMessageFeed, 0, 0, 0, nil, false, false, nil)
-    newText:SetText(FText(text))
-    newText:SetAutoWrapText(true)
-    newText.Font.Size = 17 -- default is 25, which is quite large
-    APMessageFeed:AddChild(newText)
-    scrollPending = true -- scrolling right after adding the child makes it not scroll all the way (doesn't account for text wrapping), so we defer until next update
+    ExecuteAsync(function() connect(host, slot, password) end)
 end
 
-RegisterConsoleCommandHandler("apconnect", function(cmd, args)
+RegisterConsoleCommandHandler("apconnect", function(_, args)
     if ap then
-        print("[ArchipelagoMod] Already connected.")
-        AddMessageToAPFeed("Already connected.")
-        return true;
+        log("Already connected")
+        AddMessageToAPFeed("Already connected")
+        return true
     end
-    local host = args[1]
-    local slot = args[2]
-    local password = args[3] or ""
-
+    local host, slot, password = args[1], args[2], args[3] or ""
     if not host or not slot then
-        print("[ArchipelagoMod] Usage: apconnect <host> <slot> [password]")
         AddMessageToAPFeed("Usage: apconnect <host> <slot> [password]")
-        return true;
+        return true
     end
-
     AP_Connect(host, slot, password)
-    return true;
+    return true
 end)
 
-RegisterConsoleCommandHandler("apsay", function(cmd, args)
-    local message = args[1]
-
+RegisterConsoleCommandHandler("apsay", function(_, args)
     if not ap then
-        print("[ArchipelagoMod] You must be connected to chat.")
-        AddMessageToAPFeed("You must be connected to chat.")
-        return true;
+        AddMessageToAPFeed("Connect before chatting")
+    elseif args[1] then
+        local ok, err = pcall(function() ap:Say(table.concat(args, " ")) end)
+        if not ok then log("Chat failed: " .. tostring(err)) end
     end
-
-    ap:Say(message)
-    return true;
+    return true
 end)
 
-RegisterConsoleCommandHandler("apresync", function(cmd, args)
-    if not ap then
-        print("[ArchipelagoMod] You must be connected to resync items.")
-        AddMessageToAPFeed("You must be connected to resync items.")
-        return true;
-    end
-
-    ResyncInventory()
-    return true;
+RegisterConsoleCommandHandler("apresync", function()
+    ExecuteInGameThread(function() ResyncInventory() end)
+    return true
 end)
 
-RegisterConsoleCommandHandler("apdisconnect", function(cmd, args)
-    if not ap then
-        print("[ArchipelagoMod] You're already disconnected!")
-        AddMessageToAPFeed("You're already disconnected!")
-        return true;
-    end
-    print("[ArchipelagoMod] apdisconnect used. Disconnecting...\n")
-    disconnect()
-    return true;
+RegisterConsoleCommandHandler("apstatus", function()
+    print("[AP-Status] Connected=" .. tostring(ap ~= nil))
+    ExecuteInGameThread(function() receiving.PrintInventoryStatus(all_received_items) end)
+    return true
 end)
 
-RegisterConsoleCommandHandler("apdebug", function(cmd, args) -- restores (partial) functionality to the basegame's hidden debug menu
+RegisterConsoleCommandHandler("apdisconnect", function()
+    if ap then disconnect() end
+    return true
+end)
+
+RegisterConsoleCommandHandler("aphud", function()
+    show_hud = not show_hud
+    log("HUD " .. (show_hud and "on" or "off"))
+    if not show_hud and APMessageFeed and APMessageFeed:IsValid() then
+        APMessageFeed:ClearChildren()
+    end
+    return true
+end)
+
+RegisterConsoleCommandHandler("apdebug", function()
     local world = UEHelpers:GetWorld()
     local menu = StaticFindObject("/Game/GUI/HUD/UMG_HUD_Debug.UMG_HUD_Debug_C")
-    local controller = UEHelpers:GetPlayerController() -- replaces FindFirstOf("BP_HKPlayerController_C")
+    local controller = UEHelpers:GetPlayerController()
     local fn = StaticFindObject("/Script/UMG.WidgetBlueprintLibrary:Create")
-    local widget = fn(world, world, menu, controller) -- spawn widget with World as context, World as world object, the Menu itself as the widget to spawn, and the Controller as the controller to use the menu
-    widget:AddToViewport(999) -- high Z layer, so it's over the death/pause/B12 menus
+    local widget = fn(world, world, menu, controller)
+    widget:AddToViewport(999)
     widget:AddToPlayerScreen(999)
-    print("creating bindings...\n")
-    RegisterKeyBind(Key.H, function()
-        widget:OnOpened()
-    end)
-    RegisterKeyBind(Key.I, function()
-        widget:OnGUIUp()
-    end)
-    RegisterKeyBind(Key.K, function()
-        widget:OnGUIDown()
-    end)
-    RegisterKeyBind(Key.J, function()
-        widget:OnGUILeft() -- unused?
-    end)
-    RegisterKeyBind(Key.L, function()
-        widget:OnGUIRight() -- unused?
-    end)
-    RegisterKeyBind(Key.U, function()
-        widget:OnGUIValidate()
-    end)
-    RegisterKeyBind(Key.O, function()
-        widget:OnGUICancel()
-    end)
-    RegisterKeyBind(Key.ESCAPE, function()
-        widget:OnClosed()
-    end)
-    RegisterKeyBind(Key.P, function()
-        widget:OnClosed()
-    end)
-    print("binds created:\n")
-    print("H = Open\n")
-    print("IJKL = Navigate\n")
-    print("U = Select Option\n")
-    print("O = Back\n")
-    print("ESCAPE/P = Close\n")
-    return true;
+    debug_widget = widget
+    -- Original mod bindings, installed once rather than on every invocation.
+    if not debug_bound then
+        RegisterKeyBind(Key.H, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnOpened() end end)
+        RegisterKeyBind(Key.I, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUIUp() end end)
+        RegisterKeyBind(Key.K, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUIDown() end end)
+        RegisterKeyBind(Key.J, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUILeft() end end)
+        RegisterKeyBind(Key.L, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUIRight() end end)
+        RegisterKeyBind(Key.U, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUIValidate() end end)
+        RegisterKeyBind(Key.O, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnGUICancel() end end)
+        RegisterKeyBind(Key.ESCAPE, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnClosed() end end)
+        RegisterKeyBind(Key.P, function() if debug_widget and debug_widget:IsValid() then debug_widget:OnClosed() end end)
+        debug_bound = true
+    end
+    log("Debug bindings: H=open; IJKL=navigate; U=select; O=back; P/Escape=close")
+    return true
 end)
 
-RegisterLoadMapPostHook(function(params)
+RegisterLoadMapPostHook(function()
     local world = UEHelpers:GetWorld()
+    if not world or not world:IsValid() then return end
     local newWorld = world:GetFullName()
-    print("World Change! Now " .. newWorld .. "\n")
-    SetupUI() -- world has changed, UI needs rebuilding (since it's a child of the WorldContextObject)
-    if newWorld == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" and ap ~= nil then -- main menu
-        print("[ArchipelagoMod] Went to main menu. Disconnecting.")
+    log("World: " .. tostring(newWorld))
+    debug_widget = nil
+    SetupUI()
+    if newWorld == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then
         disconnect()
-        return
     end
 end)
 
--- Resync the inventory upon loading from checkpoint.
--- This took me about 7 hours to figure out, because, for some reason, LoadingScreenSubsystem:EndLoadingScreen never triggers???
-RegisterHook("/Script/Hk_project.Backpack:AfterLoaded", function(RemoteUnrealParam)
-    print("[ArchipelagoMod] Game loaded and inventory initalized. Resyncing items...\n") -- a prehook needs to exist, else UE4SS throws a fit for some reason
-end, function(RemoteUnrealParam) -- but all the action is in the posthook instead, after the game has resynced the inventory
-    ResyncInventory() -- that means that the game won't overwrite it if we do it right afterwards
+RegisterHook("/Script/Hk_project.Backpack:AfterLoaded", function()
+    -- UE4SS requires the prehook even when work happens in the posthook.
+end, function()
+    ResyncInventory()
 end)
 
 sending.Hooks()
-
-
+log("Safe Sync loaded; commands: apconnect, apresync, apstatus, apdisconnect, apsay, aphud, apdebug")
