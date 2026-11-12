@@ -29,6 +29,8 @@ local chat_focused = false
 local focus_attempts = 0
 local last_message = 0
 local scroll_pending = false
+local ui_active = false
+local ui_queued = false
 local debug_widget = nil
 local debug_bound = false
 
@@ -68,6 +70,7 @@ function SetupUI()
     hud, feed, scroll, input = nil, nil, nil, nil
     chat_open = false
     chat_focused = false
+    ui_active = false
     if not show_hud then return end
     local world = UEHelpers:GetWorld()
     if not valid(world) then return end
@@ -126,6 +129,7 @@ function AddMessageToAPFeed(message)
         scroll:SetRenderOpacity(1)
         last_message = gameTime()
         scroll_pending = true
+        ui_active = true
     end)
     if not ok then log("HUD message failed: " .. tostring(err)) end
 end
@@ -151,6 +155,7 @@ local function closeChat(send)
         pending_game_actions[#pending_game_actions + 1] = {type="Say", text=message}
     end
     last_message = gameTime()
+    ui_active = true
 end
 
 local function openChat()
@@ -169,6 +174,7 @@ local function openChat()
         inputMode("SetInputMode_UIOnly", input)
         input:SetKeyboardFocus()
         chat_open = true
+        ui_active = true
         chat_focused = false
         focus_attempts = 0
     end)
@@ -211,6 +217,7 @@ local function updateUI()
             scroll_pending = false
         end
     end)
+    if not chat_open and opacity <= 0 then ui_active = false end
 end
 
 function ResyncInventory()
@@ -313,6 +320,7 @@ function connect(server, slot, password)
     client:set_retrieved_handler(function() end)
     client:set_set_reply_handler(function() end)
 
+    local next_chapter_check = 0
     LoopAsync(200, function()
         if not active() then return true end
         local ok, err = pcall(function() client:poll() end)
@@ -350,17 +358,21 @@ function connect(server, slot, password)
                 end
             end
         end
-        ExecuteInGameThread(function()
-            if not active() then return end
-            local save = FindFirstOf("BP_HKSessionSaveData_C")
-            if valid(save) then
-                local chapter = tonumber(save.ChapterAdventureState) or 0
-                if chapter ~= currentGameProgression then
-                    currentGameProgression = chapter
-                    ResyncInventory()
+        local now = os.time()
+        if now >= next_chapter_check then
+            next_chapter_check = now + 2
+            ExecuteInGameThread(function()
+                if not active() then return end
+                local save = FindFirstOf("BP_HKSessionSaveData_C")
+                if valid(save) then
+                    local chapter = tonumber(save.ChapterAdventureState) or 0
+                    if chapter ~= currentGameProgression then
+                        currentGameProgression = chapter
+                        ResyncInventory()
+                    end
                 end
-            end
-        end)
+            end)
+        end
         return false
     end)
 end
@@ -484,10 +496,17 @@ RegisterHook("/Script/Hk_project.Backpack:AfterLoaded", function() end, function
 end)
 
 LoopAsync(200, function()
-    ExecuteInGameThread(function()
-        local ok, err = pcall(updateUI)
-        if not ok then log("HUD update failed: " .. tostring(err)) end
-    end)
+    if ui_active and show_hud and not ui_queued then
+        ui_queued = true
+        ExecuteInGameThread(function()
+            ui_queued = false
+            local ok, err = pcall(updateUI)
+            if not ok then
+                ui_active = false
+                log("HUD update failed: " .. tostring(err))
+            end
+        end)
+    end
     return false
 end)
 
