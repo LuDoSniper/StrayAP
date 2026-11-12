@@ -262,10 +262,10 @@ function connect(server, slot, password)
         if active() then log("Socket connected") end
     end)
     client:set_socket_error_handler(function(message)
-        if active() then disconnect("Connection error: " .. tostring(message)) end
+        if active() then log("Socket error: " .. tostring(message)) end
     end)
     client:set_socket_disconnected_handler(function()
-        if active() then disconnect("Disconnected from Archipelago") end
+        if active() and connected then disconnect("Disconnected from Archipelago") end
     end)
     client:set_room_info_handler(function()
         if active() then client:ConnectSlot(slot, password or "", 7, {"Lua-APClientPP"}, client_version) end
