@@ -483,9 +483,12 @@ RegisterConsoleCommandHandler("apdebug", function()
     return true
 end)
 
-RegisterLoadMapPostHook(function()
+RegisterInitGameStatePostHook(function()
+    hud, feed, scroll, input = nil, nil, nil, nil
     debug_widget = nil
-    SetupUI()
+    chat_open = false
+    chat_focused = false
+    ui_active = false
     local world = UEHelpers:GetWorld()
     if valid(world) and world:GetFullName() == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then
         disconnect()
@@ -493,7 +496,9 @@ RegisterLoadMapPostHook(function()
 end)
 
 RegisterHook("/Script/Hk_project.Backpack:AfterLoaded", function() end, function()
-    ResyncInventory()
+    ExecuteInGameThreadWithDelay(500, function()
+        ResyncInventory()
+    end)
 end)
 
 LoopInGameThreadWithDelay(200, function()
