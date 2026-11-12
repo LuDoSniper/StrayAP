@@ -30,7 +30,7 @@ local focus_attempts = 0
 local last_message = 0
 local scroll_pending = false
 local ui_active = false
-local ui_queued = false
+local network_loop = nil
 local debug_widget = nil
 local debug_bound = false
 
@@ -226,6 +226,10 @@ end
 
 function disconnect(reason)
     if not ap and not connecting then return end
+    if network_loop then
+        CancelDelayedAction(network_loop)
+        network_loop = nil
+    end
     ap = nil
     connected = false
     connecting = false
@@ -238,9 +242,9 @@ function disconnect(reason)
     receiving.ResetSession()
     if reason then
         log(reason)
-        ExecuteInGameThread(function() AddMessageToAPFeed(reason) end)
+        AddMessageToAPFeed(reason)
     end
-    ExecuteInGameThread(function() closeChat(false) end)
+    closeChat(false)
 end
 
 function connect(server, slot, password)
@@ -299,9 +303,7 @@ function connect(server, slot, password)
                 end
             end
         end
-        ExecuteInGameThread(function()
-            if active() then ResyncInventory() end
-        end)
+        if active() then ResyncInventory() end
     end)
     client:set_location_info_handler(function() end)
     client:set_location_checked_handler(function() end)
@@ -321,26 +323,23 @@ function connect(server, slot, password)
     client:set_set_reply_handler(function() end)
 
     local next_chapter_check = 0
-    LoopAsync(200, function()
-        if not active() then return true end
+    network_loop = LoopInGameThreadWithDelay(200, function()
+        if not active() then return end
         local ok, err = pcall(function() client:poll() end)
         if not ok then
             disconnect("Connection error: " .. tostring(err))
-            return true
+            return
         end
-        if not active() then return true end
+        if not active() then return end
         if connecting and os.time() - started >= 15 then
             disconnect("Connection timed out")
-            return true
+            return
         end
         local count = #pending_game_actions
         for _ = 1, count do
             local action = table.remove(pending_game_actions, 1)
             if action.type == "message" then
-                local message = action.text
-                ExecuteInGameThread(function()
-                    if active() then AddMessageToAPFeed(message) end
-                end)
+                if active() then AddMessageToAPFeed(action.text) end
             elseif action.type == "Say" and connected then
                 local sent, errorMessage = pcall(function() client:Say(action.text) end)
                 if not sent then enqueueMessage("Message not sent: " .. tostring(errorMessage)) end
@@ -348,8 +347,12 @@ function connect(server, slot, password)
                 if not connected then
                     pending_game_actions[#pending_game_actions + 1] = action
                 else
-                    local sent = pcall(function() client:LocationChecks({action.id}) end)
-                    if not sent then
+                    log("Submitting check " .. tostring(action.id))
+                    local sent, errorMessage = pcall(function() client:LocationChecks({action.id}) end)
+                    if sent then
+                        log("Check submitted " .. tostring(action.id))
+                    else
+                        log("Check failed " .. tostring(action.id) .. ": " .. tostring(errorMessage))
                         action.attempts = (action.attempts or 0) + 1
                         if action.attempts < 3 then
                             pending_game_actions[#pending_game_actions + 1] = action
@@ -361,30 +364,28 @@ function connect(server, slot, password)
         local now = os.time()
         if now >= next_chapter_check then
             next_chapter_check = now + 2
-            ExecuteInGameThread(function()
-                if not active() then return end
-                local save = FindFirstOf("BP_HKSessionSaveData_C")
-                if valid(save) then
-                    local chapter = tonumber(save.ChapterAdventureState) or 0
-                    if chapter ~= currentGameProgression then
-                        currentGameProgression = chapter
-                        ResyncInventory()
-                    end
+            if not active() then return end
+            local save = FindFirstOf("BP_HKSessionSaveData_C")
+            if valid(save) then
+                local chapter = tonumber(save.ChapterAdventureState) or 0
+                if chapter ~= currentGameProgression then
+                    currentGameProgression = chapter
+                    ResyncInventory()
                 end
-            end)
+            end
         end
-        return false
     end)
 end
 
 function AP_Connect(server, slot, password)
-    local world = UEHelpers:GetWorld()
-    if not valid(world) or world:GetFullName() == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then
-        ExecuteInGameThread(function() AddMessageToAPFeed("Load a save before connecting") end)
-        return
-    end
     connecting = true
-    ExecuteAsync(function()
+    ExecuteInGameThread(function()
+        local world = UEHelpers:GetWorld()
+        if not valid(world) or world:GetFullName() == "World /Game/Map/_MainGame/HK_Project_MainStart.HK_Project_MainStart" then
+            connecting = false
+            AddMessageToAPFeed("Load a save before connecting")
+            return
+        end
         local ok, err = pcall(function() connect(server, slot, password) end)
         if not ok then disconnect("Connection failed: " .. tostring(err)) end
     end)
@@ -422,7 +423,7 @@ RegisterConsoleCommandHandler("apstatus", function()
 end)
 
 RegisterConsoleCommandHandler("apdisconnect", function()
-    disconnect("Disconnected")
+    ExecuteInGameThread(function() disconnect("Disconnected") end)
     return true
 end)
 
@@ -495,19 +496,13 @@ RegisterHook("/Script/Hk_project.Backpack:AfterLoaded", function() end, function
     ResyncInventory()
 end)
 
-LoopAsync(200, function()
-    if ui_active and show_hud and not ui_queued then
-        ui_queued = true
-        ExecuteInGameThread(function()
-            ui_queued = false
-            local ok, err = pcall(updateUI)
-            if not ok then
-                ui_active = false
-                log("HUD update failed: " .. tostring(err))
-            end
-        end)
+LoopInGameThreadWithDelay(200, function()
+    if not ui_active or not show_hud then return end
+    local ok, err = pcall(updateUI)
+    if not ok then
+        ui_active = false
+        log("HUD update failed: " .. tostring(err))
     end
-    return false
 end)
 
 sending.Hooks()
