@@ -367,7 +367,6 @@ function M.Hooks()
             skipped = true
             return
         end
-        print("[ArchipelagoMod] _OnDroneUseEnded called on " .. instance:GetFullName() .. "\n")
         local class = instance:GetClass():GetFName():ToString() -- what class called this function?
         if class ~= "COMP_Lootable_C" and class ~= "LootableComponent" then
             skipped = true -- some other interactable (terminal, npc, sign, memory)
@@ -407,15 +406,14 @@ function M.Hooks()
 
     -- This checks items given through NPC dialog or through "ITEM GET" notifications
     RegisterHook("/Script/Hk_project.Dialog:EndDialogLine", function(RemoteUnrealParam)
-        local instance = RemoteUnrealParam:Get() -- get the actual instance that called this function
-        print("[ArchipelagoMod] EndDialogLine called on " .. instance:GetFullName() .. "\n")
+        local instance = RemoteUnrealParam:Get()
+        if not instance or not instance:IsValid() then return end
         local line = instance:GetCurrentLine()
         if not line then return end
         local itemToGive = line.ItemToGive
-        if not itemToGive then return end
-        local item = itemToGive:GetFullName() -- I have to seperate these two. doing it on the same line makes UE falsely claim that "ItemToGive" doesn't exist in the table
+        if not itemToGive or not itemToGive:IsValid() then return end
+        local item = itemToGive:GetFullName()
         if item ~= nil then
-            print("[ArchipelagoMod] This line gives an item: " .. item .. "\n")
             for key, locationid in pairs(dialog_id_to_location) do
                 if item:match(key .. "$") then -- if the last part of the item name is the key, this passes
                     print("[ArchipelagoMod] ID: " .. locationid .. "\n")
@@ -433,14 +431,14 @@ function M.Hooks()
                     return
                 end
             end
-            print("[ArchipelagoMod] Couldn't find a location for the item this dialog gives!\n")
+
         end
     end)
 
     -- All scratching spots have a CatMoveToUsableComponent script, and _OnAfterMoveUseStarted is called when the scratching animation starts
     RegisterHook("/Script/Hk_project.CatMoveToUsableComponent:_OnAfterMoveUseStarted", function(RemoteUnrealParam)
-        local instance = RemoteUnrealParam:Get() -- get the actual instance that called this function
-        print("[ArchipelagoMod] _OnAfterMoveUseStarted called on " .. instance:GetFullName() .. "\n")
+        local instance = RemoteUnrealParam:Get()
+        if not instance or not instance:IsValid() then return end
         local class = instance:GetClass():GetFName():ToString() -- what class called this function?
         if class == "COMP_CatMoveToAnim_C" then -- this same call is used when interacting with the Slums Vending Machines, so I check for those here too
             if instance:GetFullName():find("VendingMaching2", 1, true) then
@@ -502,9 +500,9 @@ function M.Hooks()
 
     -- This checks when a special animation or sequence of animations plays
     RegisterHook("/Script/MovieScene.MovieSceneSequencePlayer:Play", function(RemoteUnrealParam)
-        local instance = RemoteUnrealParam:Get() -- get the actual instance that called this function
+        local instance = RemoteUnrealParam:Get()
+        if not instance or not instance:IsValid() then return end
         local name = instance:GetFullName()
-        print("[ArchipelagoMod] LevelSequencePlayer:Play called on " .. name .. "\n")
         if not ap then
             return -- do nothing while offline
         end
