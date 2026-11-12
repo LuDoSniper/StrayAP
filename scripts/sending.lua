@@ -332,36 +332,43 @@ function M.Hooks()
         return dx * dx + dy * dy + dz * dz <= tolerance * tolerance
     end
 
-    function RemoveLastItemFromTArray(array)
-        if not ap then
-            return -- do nothing while offline
-        end
-        local backpack = FindFirstOf("BP_Backpack_C")
-        if not backpack or not backpack:IsValid() then
-            print("[ArchipelagoMod] Can't update the inventory because the cat doesn't have the backpack!\n")
-            return
-        end
-        -- As far as I am aware, it is impossible to safely remove a value from a TArray inside UE4SS's Lua scripting
-        -- The workaround is to make a local Lua table of the TArray, remove the value from that, wipe the TArray, and reassign the Lua table to the TArray
-        local temp = {} -- temporary Lua table
-        array:ForEach(function(i, elem)
-            local val = elem:get()
-            if val ~= nil then
-                temp[#temp + 1] = val -- for each element, store its actual value inside the Lua table (if not nil)
+    function RemoveCheckedItem(id, className)
+        ExecuteInGameThreadWithDelay(100, function()
+            local backpack = FindFirstOf("BP_Backpack_C")
+            if not backpack or not backpack:IsValid() then return end
+            local item = nil
+            if id then
+                item = backpack:FindItemInInventory(FName(id))
+            else
+                backpack.m_inventory:ForEach(function(_, entry)
+                    local value = entry:get()
+                    if value and value:IsValid() then
+                        local owner = value:GetOwner()
+                        if owner and owner:IsValid() and owner:GetClass():GetFullName() == className then
+                            item = value
+                        end
+                    end
+                end)
+            end
+            if not item or not item:IsValid() then
+                print("[ArchipelagoMod] Checked item not found: " .. tostring(id or className))
+                return
+            end
+            local owner = item:GetOwner()
+            if not owner or not owner:IsValid() then return end
+            local ok, err = pcall(function()
+                backpack:RemoveObjectFromInventory(item, owner:K2_GetActorLocation(), owner:K2_GetActorRotation())
+                if owner:IsValid() then owner:K2_DestroyActor() end
+            end)
+            if not ok then
+                print("[ArchipelagoMod] Checked item removal failed: " .. tostring(err))
             end
         end)
-        if #temp > 0 then
-            table.remove(temp, #temp) -- remove the last value from the Lua table
-        end
-        backpack:ClearInventory() -- wipe the inventory
-        for i, value in ipairs(temp) do
-            array[i] = value -- reassign each value explicity (yes, assigning the value directly this way does work in UE4SS)
-        end
     end
 
-    -- This covers all items that are picked up directly from the game world itself by B12
     RegisterHook("/Script/Hk_project.DroneUsableComponent:_OnDroneUseEnded", function(RemoteUnrealParam)
         skipped = false
+        checked_item_id = nil
         local instance = RemoteUnrealParam:Get()
         if not instance or not instance:IsValid() then
             skipped = true
@@ -380,8 +387,8 @@ function M.Hooks()
             return
         end
         if ID == "energydrink" then
-            print("[ArchipelagoMod] Energy Drink pickup. This check was already sent.\n") -- see _OnAfterMoveUseStarted below
-            return -- don't mark as skipped, since we do still want to remove the item from the player's inventory
+            checked_item_id = ID
+            return
         end
         local locID = lootable_id_to_location[ID]
         if not locID then
@@ -389,19 +396,17 @@ function M.Hooks()
             return
         end
         print("[ArchipelagoMod] Location ID " .. locID .. "\n")
+        checked_item_id = ID
         table.insert(pending_game_actions, { -- Lua is not thread safe, so we defer this to the Archipelago thread through a shared table
             type = "SendLocations",
             id = locID
         })
     end, function()
-        if skipped == true then
-            skipped = false
-            return
+        if not skipped and checked_item_id then
+            RemoveCheckedItem(checked_item_id)
         end
         skipped = false
-        local backpack = FindFirstOf("BP_Backpack_C")
-        if not backpack or not backpack:IsValid() then return end
-        RemoveLastItemFromTArray(backpack.m_inventory)
+        checked_item_id = nil
     end)
 
     -- This checks items given through NPC dialog or through "ITEM GET" notifications
@@ -425,9 +430,7 @@ function M.Hooks()
                         type = "SendLocations",
                         id = locationid
                     })
-                    local backpack = FindFirstOf("BP_Backpack_C")
-                    if not backpack or not backpack:IsValid() then return end
-                    RemoveLastItemFromTArray(backpack.m_inventory)
+                    RemoveCheckedItem(nil, item)
                     return
                 end
             end
