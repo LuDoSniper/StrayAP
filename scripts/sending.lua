@@ -362,7 +362,11 @@ function M.Hooks()
     -- This covers all items that are picked up directly from the game world itself by B12
     RegisterHook("/Script/Hk_project.DroneUsableComponent:_OnDroneUseEnded", function(RemoteUnrealParam)
         skipped = false
-        local instance = RemoteUnrealParam:Get() -- get the actual instance that called this function
+        local instance = RemoteUnrealParam:Get()
+        if not instance or not instance:IsValid() then
+            skipped = true
+            return
+        end
         print("[ArchipelagoMod] _OnDroneUseEnded called on " .. instance:GetFullName() .. "\n")
         local class = instance:GetClass():GetFName():ToString() -- what class called this function?
         if class ~= "COMP_Lootable_C" and class ~= "LootableComponent" then
@@ -381,6 +385,10 @@ function M.Hooks()
             return -- don't mark as skipped, since we do still want to remove the item from the player's inventory
         end
         local locID = lootable_id_to_location[ID]
+        if not locID then
+            skipped = true
+            return
+        end
         print("[ArchipelagoMod] Location ID " .. locID .. "\n")
         table.insert(pending_game_actions, { -- Lua is not thread safe, so we defer this to the Archipelago thread through a shared table
             type = "SendLocations",
@@ -393,8 +401,8 @@ function M.Hooks()
         end
         skipped = false
         local backpack = FindFirstOf("BP_Backpack_C")
-        local inventory = backpack.m_inventory
-        RemoveLastItemFromTArray(inventory)
+        if not backpack or not backpack:IsValid() then return end
+        RemoveLastItemFromTArray(backpack.m_inventory)
     end)
 
     -- This checks items given through NPC dialog or through "ITEM GET" notifications
@@ -402,7 +410,10 @@ function M.Hooks()
         local instance = RemoteUnrealParam:Get() -- get the actual instance that called this function
         print("[ArchipelagoMod] EndDialogLine called on " .. instance:GetFullName() .. "\n")
         local line = instance:GetCurrentLine()
-        local item = line.ItemToGive:GetFullName() -- I have to seperate these two. doing it on the same line makes UE falsely claim that "ItemToGive" doesn't exist in the table
+        if not line then return end
+        local itemToGive = line.ItemToGive
+        if not itemToGive then return end
+        local item = itemToGive:GetFullName() -- I have to seperate these two. doing it on the same line makes UE falsely claim that "ItemToGive" doesn't exist in the table
         if item ~= nil then
             print("[ArchipelagoMod] This line gives an item: " .. item .. "\n")
             for key, locationid in pairs(dialog_id_to_location) do
@@ -417,8 +428,8 @@ function M.Hooks()
                         id = locationid
                     })
                     local backpack = FindFirstOf("BP_Backpack_C")
-                    local inventory = backpack.m_inventory
-                    RemoveLastItemFromTArray(inventory)
+                    if not backpack or not backpack:IsValid() then return end
+                    RemoveLastItemFromTArray(backpack.m_inventory)
                     return
                 end
             end
